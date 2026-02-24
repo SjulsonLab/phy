@@ -10,6 +10,8 @@
 from functools import partial
 import inspect
 import logging
+import os
+from time import perf_counter
 
 import numpy as np
 
@@ -23,6 +25,8 @@ from phy.gui.qt import _block, set_busy, _wait
 from phy.gui.widgets import Table, HTMLWidget, _uniq, Barrier
 
 logger = logging.getLogger(__name__)
+_PROFILE_SELECTION = os.environ.get('PHY_PROFILE_SELECTION', '').strip().lower() not in (
+    '', '0', 'false', 'no')
 
 
 # ----------------------------------------------------------------------------
@@ -811,37 +815,63 @@ class Supervisor(object):
         update_views is False."""
         if sender != self.cluster_view:
             return
+        t0 = perf_counter()
         cluster_ids = obj['selected']
         next_cluster = obj['next']
         kwargs = obj.get('kwargs', {})
         logger.debug("Clusters selected: %s (%s)", cluster_ids, next_cluster)
         self.task_logger.log(self.cluster_view, 'select', cluster_ids, output=obj)
         # Update the similarity view when the cluster view selection changes.
+        t_reset = perf_counter()
         self.similarity_view.reset(cluster_ids)
+        reset_ms = 1000. * (perf_counter() - t_reset)
         self.similarity_view.set_selected_index_offset(len(self.selected_clusters))
         # Emit supervisor.select event unless update_views is False. This happens after
         # a merge event, where the views should not be updated after the first cluster_view.select
         # event, but instead after the second similarity_view.select event.
+        emit_ms = 0.
         if kwargs.pop('update_views', True):
+            t_emit = perf_counter()
             emit('select', self, self.selected, **kwargs)
+            emit_ms = 1000. * (perf_counter() - t_emit)
         if cluster_ids:
             self.cluster_view.scroll_to(cluster_ids[-1])
         self.cluster_view.dock.set_status('clusters: %s' % ', '.join(map(str, cluster_ids)))
+        if _PROFILE_SELECTION:
+            logger.info(
+                "[profile/select/supervisor] source=cluster_view n=%d reset=%.2fms "
+                "emit=%.2fms total=%.2fms",
+                len(cluster_ids) if cluster_ids is not None else 0,
+                reset_ms,
+                emit_ms,
+                1000. * (perf_counter() - t0),
+            )
 
     def _similar_selected(self, sender, obj):
         """When clusters are selected in the similarity view, register the action in the history
         stack, and emit the global supervisor.select event."""
         if sender != self.similarity_view:
             return
+        t0 = perf_counter()
         similar = obj['selected']
         next_similar = obj['next']
         kwargs = obj.get('kwargs', {})
         logger.debug("Similar clusters selected: %s (%s)", similar, next_similar)
         self.task_logger.log(self.similarity_view, 'select', similar, output=obj)
+        t_emit = perf_counter()
         emit('select', self, self.selected, **kwargs)
+        emit_ms = 1000. * (perf_counter() - t_emit)
         if similar:
             self.similarity_view.scroll_to(similar[-1])
         self.similarity_view.dock.set_status('similar clusters: %s' % ', '.join(map(str, similar)))
+        if _PROFILE_SELECTION:
+            logger.info(
+                "[profile/select/supervisor] source=similarity_view n=%d emit=%.2fms "
+                "total=%.2fms",
+                len(similar) if similar is not None else 0,
+                emit_ms,
+                1000. * (perf_counter() - t0),
+            )
 
     def _on_action(self, sender, name, *args):
         """Called when an action is triggered: enqueue and process the task."""

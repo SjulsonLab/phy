@@ -10,6 +10,8 @@
 from functools import partial
 import gc
 import logging
+import os
+from time import perf_counter
 
 import numpy as np
 
@@ -22,6 +24,8 @@ from phy.plot import PlotCanvas, NDC, extend_bounds
 from phy.utils.color import ClusterColorSelector
 
 logger = logging.getLogger(__name__)
+_PROFILE_SELECTION = os.environ.get('PHY_PROFILE_SELECTION', '').strip().lower() not in (
+    '', '0', 'false', 'no')
 
 
 # -----------------------------------------------------------------------------
@@ -171,8 +175,18 @@ class ManualClusteringView(object):
         # is implemented at the level of the table widget, not here.
 
         # This function executes in the Qt thread pool.
+        timings = Bunch(
+            start=perf_counter(),
+            compute_start=None,
+            compute_end=None,
+            flush_start=None,
+            flush_end=None,
+        )
+
         def _worker():  # pragma: no cover
+            timings.compute_start = perf_counter()
             self.on_select(cluster_ids=cluster_ids, **kwargs)
+            timings.compute_end = perf_counter()
 
         # We launch this function in the thread pool.
         worker = Worker(_worker)
@@ -186,6 +200,7 @@ class ManualClusteringView(object):
         # them here, in the main GUI thread.
         @worker.signals.finished.connect
         def finished():
+            timings.flush_start = perf_counter()
             # HACK: work-around for https://github.com/cortex-lab/phy/issues/1016
             try:
                 self
@@ -202,18 +217,37 @@ class ManualClusteringView(object):
                     program[name] = data
             # Finally, we update the canvas.
             self.canvas.update()
+            timings.flush_end = perf_counter()
             emit('is_busy', self, False)
             self._lock = None
             self.update_status()
+            if _PROFILE_SELECTION:
+                compute_ms = 0.
+                if timings.compute_start is not None and timings.compute_end is not None:
+                    compute_ms = 1000. * (timings.compute_end - timings.compute_start)
+                flush_ms = 0.
+                if timings.flush_start is not None and timings.flush_end is not None:
+                    flush_ms = 1000. * (timings.flush_end - timings.flush_start)
+                total_ms = 1000. * (perf_counter() - timings.start)
+                logger.info(
+                    "[profile/select/view] %s clusters=%d threaded=%s compute=%.2fms "
+                    "flush=%.2fms total=%.2fms",
+                    getattr(self, 'name', self.__class__.__name__),
+                    len(cluster_ids),
+                    use_threading,
+                    compute_ms,
+                    flush_ms,
+                    total_ms,
+                )
 
         # Start the task on the thread pool, and let the OpenGL canvas know that we're
         # starting to record all OpenGL calls instead of executing them immediately.
         # This is what we call the "lazy" mode.
         emit('is_busy', self, True)
 
-        # HACK: disable threading mechanism for now
-        # if getattr(gui, '_enable_threading', True):
-        if 0:   # pragma: no cover
+        use_threading = bool(
+            getattr(gui, '_enable_threading', True) and self._enable_threading)
+        if use_threading:   # pragma: no cover
             # This is only for OpenGL views.
             self.canvas.set_lazy(True)
             thread_pool().start(worker)
